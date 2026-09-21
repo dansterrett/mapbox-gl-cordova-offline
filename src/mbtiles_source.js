@@ -9,6 +9,7 @@ class MBTilesSource extends VectorTileSource {
         super(id, options, dispatcher, eventedParent);
         this.type = "mbtiles";
         this.db = this.openDatabase(options.path);
+        // this.maxzoom = 14;
     }
 
     openDatabase(dbLocation) {
@@ -20,15 +21,38 @@ class MBTilesSource extends VectorTileSource {
     }
 
     readTile(z, x, y, callback) {
-        const query = 'SELECT BASE64(tile_data) AS base64_tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?';
+        if (!window.device || device.platform === 'browser') {
+          const query = 'SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?';
+          const params = [z, x, y];
+          this.db.then(function(db) {
+            db.each(query, params, function(result) {
+              const rawData = pako.inflate(result.tile_data);
+              callback(undefined, base64js.fromByteArray(rawData)); // Tile contents read, callback success.
+            }, function (done) {
+              // Do nothing
+            });
+          }).catch(function(err) {
+            callback(err);
+          });
+
+          return;
+        }
+
+        // Use hex() instead of BASE64() — hex() is available in all SQLite drivers including
+        // Android's built-in sqlite, whereas BASE64() is only in the NDK driver.
+        const query = 'SELECT hex(tile_data) AS hex_tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?';
         const params = [z, x, y];
         this.db.then(function(db) {
             db.transaction(function (txn) {
                 txn.executeSql(query, params, function (tx, res) {
                     if (res.rows.length) {
-                        const base64Data = res.rows.item(0).base64_tile_data;
-                        const rawData = pako.inflate(base64js.toByteArray(base64Data));
-                        callback(undefined, base64js.fromByteArray(rawData)); // Tile contents read, callback success.
+                      const hexData = res.rows.item(0).hex_tile_data;
+                      const bytes = new Uint8Array(hexData.length / 2);
+                      for (let i = 0; i < hexData.length; i += 2) {
+                          bytes[i / 2] = parseInt(hexData.substring(i, i + 2), 16);
+                      }
+                      const rawData = pako.inflate(bytes);
+                      callback(undefined, base64js.fromByteArray(rawData)); // Tile contents read, callback success.
                     } else {
                         callback(new Error('tile ' + params.join(',') + ' not found'));
                     }
@@ -72,13 +96,14 @@ class MBTilesSource extends VectorTileSource {
                 showCollisionBoxes: this.map.showCollisionBoxes
             };
 
-            if (!tile.workerID || tile.state === 'expired') {
-                tile.workerID = this.dispatcher.send('loadTile', params, done.bind(this));
+            if (!tile.actor || tile.state === 'expired') {
+                tile.actor = this.dispatcher.getActor();
+                tile.request = tile.actor.send('loadTile', params, done.bind(this));
             } else if (tile.state === 'loading') {
                 // schedule tile reloading after it has been loaded
                 tile.reloadCallback = callback;
             } else {
-                this.dispatcher.send('reloadTile', params, done.bind(this), tile.workerID);
+                tile.request = tile.actor.send('reloadTile', params, done.bind(this));
             }
 
             function done(err, data) {

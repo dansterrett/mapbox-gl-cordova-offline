@@ -1,6 +1,7 @@
 import RasterTileSource from 'mapbox-gl/src/source/raster_tile_source';
 import { extend, pick } from 'mapbox-gl/src/util/util'
 import Texture from 'mapbox-gl/src/render/texture'
+import base64js from 'base64-js'
 import Database from './database'
 
 class RasterTileSourceOffline extends RasterTileSource {
@@ -77,9 +78,37 @@ class RasterTileSourceOffline extends RasterTileSource {
 
     _getBlob(coord, callback){
 
+        if (device.platform === 'browser') {
+            const coordY = Math.pow(2, coord.z) -1 - coord.y;
+
+            const query = 'SELECT tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?';
+            const params = [coord.z, coord.x, coordY];
+
+            const base64Prefix = 'data:image/' + this.imageFormat + ';base64,';
+
+            this.db.then(function(db) {
+                db.each(query, params, function(result) {
+                    callback(undefined,
+                      {
+                        data: base64Prefix + base64js.fromByteArray(result.tile_data),
+                        cacheControl: null,
+                        expires: null
+                      });
+                }, function (done) {
+                    // Do nothing
+                });
+            }).catch(function(err) {
+                callback(err);
+            });
+
+            return;
+        }
+
         const coordY = Math.pow(2, coord.z) -1 - coord.y;
 
-        const query = 'SELECT BASE64(tile_data) AS base64_tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?';
+        // Use hex() instead of BASE64() — hex() is available in all SQLite drivers including
+        // Android's built-in sqlite, whereas BASE64() is only in the NDK driver.
+        const query = 'SELECT hex(tile_data) AS hex_tile_data FROM tiles WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?';
         const params = [coord.z, coord.x, coordY];
 
         const base64Prefix = 'data:image/' + this.imageFormat + ';base64,';
@@ -88,9 +117,14 @@ class RasterTileSourceOffline extends RasterTileSource {
             db.transaction((txn) => {
                 txn.executeSql(query, params, (tx, res) => {
                     if (res.rows.length) {
+                        const hexData = res.rows.item(0).hex_tile_data;
+                        const bytes = new Uint8Array(hexData.length / 2);
+                        for (let i = 0; i < hexData.length; i += 2) {
+                            bytes[i / 2] = parseInt(hexData.substring(i, i + 2), 16);
+                        }
                         callback(undefined,
                             {
-                                data: base64Prefix + res.rows.item(0).base64_tile_data,
+                                data: base64Prefix + base64js.fromByteArray(bytes),
                                 cacheControl: null,
                                 expires: null
                             });
