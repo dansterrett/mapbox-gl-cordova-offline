@@ -20,6 +20,36 @@ class Database {
                         );
                     });
                 }
+                // On iOS, the mbtiles file is downloaded to Documents/maps/<name>. The legacy flow below
+                // only looks in the Documents root and then falls back to copyDatabaseFile, which builds
+                // `applicationDirectory + 'www/' + <full URL>` -> malformed URL -> ENCODING_ERR (code 5).
+                // Instead, open it directly using a path relative to Documents. sqlitePlugin on iOS
+                // appends `name` to the Documents dir, so subpaths like 'maps/x.mbtiles' work. Using a
+                // relative path also survives app container UUID changes (e.g. simulator reinstalls).
+                if (!isBrowser && device.platform === 'iOS') {
+                    var iosRelPath = dbName;
+                    var docsMatch = dbLocation.match(/(?:\/Documents\/|__cdvfile_documents__\/)(.+)$/);
+                    if (docsMatch) {
+                        try {
+                            iosRelPath = decodeURIComponent(docsMatch[1]);
+                        } catch (e) {
+                            iosRelPath = docsMatch[1];
+                        }
+                    }
+                    console.log('Opening offline map DB on iOS from Documents-relative path:', iosRelPath, '| dbLocation:', dbLocation);
+                    return new Promise(function (resolve, reject) {
+                        var db = sqlitePlugin.openDatabase({
+                            name: iosRelPath,
+                            iosDatabaseLocation: 'Documents'
+                        }, function () {
+                            console.log('Offline map DB opened OK (iOS):', iosRelPath);
+                            resolve(db);
+                        }, function (err) {
+                            console.error('Offline map DB open error (iOS):', err);
+                            reject(err);
+                        });
+                    });
+                }
 
                 return new Promise(function (resolve, reject) {
                     if (isBrowser) {
